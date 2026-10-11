@@ -1,8 +1,11 @@
-# Spring Batcher
+# Batcher
 
-This library combines collection elements from multiple calls to a Spring bean into batches.
-Buffers are stored in **Caffeine**, annotations are discovered by `BatchBeanPostProcessor`,
-and calls are intercepted by Spring AOP proxies.
+Two APIs are available:
+
+- **Generated inputs:** `Batcher.init(interface, settings, handler)` collects single elements
+  of any reference type without Spring, AOP, or reflection on the input path.
+- **Spring batching:** the existing `@Batch` API combines collection elements from calls to
+  Spring beans. Buffers are stored in Caffeine and calls are intercepted by Spring AOP proxies.
 
 ## Installation
 
@@ -16,6 +19,112 @@ Add the dependency to your Maven project:
     <version>0.0.1-SNAPSHOT</version>
 </dependency>
 ```
+
+## Generated Inputs
+
+Declare the input interface in its own source file. `User` is your application's DTO, record,
+entity, or any other reference type:
+
+```java
+import org.batcher.BatchInput;
+import org.batcher.BatchInputType;
+
+@BatchInputType
+public interface UserInput extends BatchInput<User> {
+    void foo(User value);
+}
+```
+
+Pass batching settings and the batch handler when creating the implementation:
+
+```java
+import java.time.Duration;
+import org.batcher.Batcher;
+import org.batcher.BatchSettings;
+
+try (var b = Batcher.init(
+        UserInput.class,
+        new BatchSettings(100, Duration.ofMillis(200)),
+        repository::saveAll)) {
+    b.foo(firstUser);
+    b.foo(secondUser);
+} // Flushes the remaining elements and waits for delivery.
+```
+
+The handler receives `List<User>`; `BatchInput<User>` links the interface and handler types
+at compile time. No service class, `default` batch method, or `@Batch` annotation is needed.
+Objects are stored by reference, not cloned or wrapped. Creating an object before calling
+`foo()` is the caller's responsibility; the batcher does not create an object per addition.
+
+Payload types may also be interfaces, arrays, or parameterized types such as `Envelope<User>`,
+`Map<String, User>`, and `List<? extends User>`. To mix unrelated payload types, declare
+`BatchInput<Object>` with `void foo(Object value)`; the handler then receives `List<Object>`.
+
+### Enable Code Generation
+
+On modern JDKs, annotation processing must be explicitly enabled. In the **consumer project's**
+Maven compiler configuration, add the library to the processor path and select the processor
+(keep the regular library dependency as well):
+
+```xml
+<plugin>
+    <groupId>org.apache.maven.plugins</groupId>
+    <artifactId>maven-compiler-plugin</artifactId>
+    <version>3.15.0</version>
+    <configuration>
+        <annotationProcessorPaths>
+            <path>
+                <groupId>org.batcher</groupId>
+                <artifactId>batcher</artifactId>
+                <version>0.0.1-SNAPSHOT</version>
+            </path>
+        </annotationProcessorPaths>
+        <annotationProcessors>
+            <annotationProcessor>org.batcher.processor.BatchInputProcessor</annotationProcessor>
+        </annotationProcessors>
+    </configuration>
+</plugin>
+```
+
+The processor generates `UserInputImpl`. `Batcher.init()` finds it once, via reflection at
+initialization; `foo(User)` calls its typed buffer directly. This project's main compilation disables
+processing because it builds the processor itself; test compilation enables the built processor.
+
+### Generated Input Contract
+
+- A public, non-generic, non-sealed interface annotated with `@BatchInputType` must extend
+  `BatchInput<T>` with a fully resolved element type. Nested interfaces are supported when all
+  enclosing types are public.
+- Exactly one abstract input method is supported besides `close()`: it must return `void`, take
+  one argument and declare no checked exceptions. Inherited input methods and additional
+  default/static methods are supported. Generated `close()` always performs buffer cleanup,
+  even if the interface declares a default `close()`.
+- Reference arguments must exactly match `T`; any object assignable to that type can be
+  submitted. Nulls and object identity are preserved. Parameterized types, arrays, and wildcard
+  type arguments with resolved bounds are supported. Raw types and unbound type variables
+  are not supported.
+- As an optional primitive optimization, `int` is supported for `BatchInput<Integer>` using
+  an `int[]` buffer; other scalar primitives are not supported yet. Object inputs do not
+  depend on this specialization.
+- `maxSize` and `timeout` must be positive. Timeout is measured from the first element, not
+  reset by subsequent additions; it determines when a batch is queued, not when it completes.
+- Concurrent additions are serialized by the buffer monitor. Order and duplicates are
+  preserved; for concurrent callers, order follows monitor acquisition.
+- Each initialized input owns independent scheduling and sequential asynchronous delivery,
+  with up to one timer thread and one worker thread, started lazily. Always close inputs or
+  arrange for application lifecycle cleanup. Calling-thread context is not propagated.
+- `close()` rejects further additions, queues the remainder and waits up to 30 seconds for
+  deliveries. Timeout/interruption raises `IllegalStateException`; already queued work is not
+  cancelled. Closing from the handler itself initiates shutdown without waiting for that worker.
+- Handler failures are logged, later deliveries continue, and there are no retries.
+- Allocations remain **per batch**: storage, timer/queue tasks and the delivered list. The `int`
+  path boxes values when the worker creates `List<Integer>`. Delivered lists are not reused and
+  may be retained by the handler. Reference objects themselves are not copied.
+- Storage is allocated with capacity `maxSize` on the first addition to each batch. Queued work
+  is unbounded: choose sensible limits and ensure producers do not permanently outpace handlers.
+  Delivery is best-effort and in-memory, not durable.
+
+## Spring Integration (Existing API)
 
 Spring Boot registers the post processor automatically through auto-configuration.
 For a plain Spring context, add `@EnableBatching` to your configuration:
