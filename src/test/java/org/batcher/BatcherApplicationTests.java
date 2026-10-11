@@ -1,4 +1,4 @@
-package org.example.batcher;
+package org.batcher;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;

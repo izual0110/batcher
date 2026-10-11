@@ -1,4 +1,4 @@
-package org.example.batcher;
+package org.batcher;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
